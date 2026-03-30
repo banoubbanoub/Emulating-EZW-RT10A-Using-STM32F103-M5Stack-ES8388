@@ -1,37 +1,160 @@
+Overview
 
-This directory is intended for project header files.
+This project focuses on reverse engineering Sony’s proprietary S-AIR wireless audio system and recreating its behavior using microcontrollers.
 
-A header file is a file containing C declarations and macro definitions
-to be shared between several project source files. You request the use of a
-header file in your project source file (C, C++, etc) located in `src` folder
-by including it, with the C preprocessing directive `#include'.
+The main goal was to emulate the Sony EZW-RT10A wireless module using an STM32F103, allowing custom audio to be injected into the Sony TA-SA100WR surround amplifier.
 
-```src/main.c
+Additionally, this repository includes:
 
-#include "header.h"
+ESP32-based transmitter emulation
+ESP32-based receiver/audio conversion
+Real-time I2S format conversion for external amplifiers
+What This Project Does
+✅ Emulates EZW-RT10A using STM32F103
+✅ Reproduces Sony I2C protocol (0x40 / 0x41)
+✅ Implements LINK and INT behavior
+✅ Enables audio injection into Sony TA-SA100WR
+✅ Emulates Sony transmitter using ESP32
+✅ Converts Sony I2S → standard I2S for external boards
+✅ Drives Samsung TV amplifier (TAS5749M)
 
-int main (void)
-{
- ...
-}
-```
+System Architecture
+🔹 EZW-RT10A Emulation (Audio Injection)
+Hardware Used
+STM32F103 (Blue Pill)
+ESP32
+Sony EZW-RT10A module
+Sony TA-SA100WR
+Sony DAV-HDX589W (for sniffing/reference)
+M5Stack ES8388 audio codec
+Samsung TV audio board (TAS5749M)
+Logic Analyzer (PulseView)
+Key Concepts
+📡 I2C Reverse Engineering
+Address 0x40 → control/status
+Address 0x41 → DSP/coefficients
 
-Including a header file produces the same results as copying the header file
-into each source file that needs it. Such copying would be time-consuming
-and error-prone. With a header file, the related declarations appear
-in only one place. If they need to be changed, they can be changed in one
-place, and programs that include the header file will automatically use the
-new version when next recompiled. The header file eliminates the labor of
-finding and changing all the copies as well as the risk that a failure to
-find one copy will result in inconsistencies within a program.
+Important registers:
 
-In C, the convention is to give header files names that end with `.h'.
+0x13 → status polling
+0x41 → link state
+0x50 → 17-byte system block
+0x74 → critical trigger
+LINK & INT Behavior
+LINK goes HIGH only after valid sequence
+INT must pulse (not toggle continuously)
+Timing is critical for pairing
 
-Read more about using header files in official GCC documentation:
+I2S Audio Format
 
-* Include Syntax
-* Include Operation
-* Once-Only Headers
-* Computed Includes
+Sony EZW-RT10A output:
 
-https://gcc.gnu.org/onlinedocs/cpp/Header-Files.html
+48 kHz
+32-bit stereo
+BCK ≈ 3.072 MHz
+
+External amplifier requirement:
+
+48 kHz
+16-bit or mono
+BCK ≈ 1.536 MHz
+
+ Requires real-time I2S conversion (ESP32)
+
+Tools Used
+PulseView (logic analyzer)
+Python (sniff parsing → arrays)
+STM32 HAL
+Arduino / PlatformIO (ESP32)
+Python Sniff Processing
+
+PulseView I2C logs were converted into C arrays for firmware:
+
+Extracted transactions
+Grouped by pointer
+Generated replay tables
+
+Used for:
+
+realistic reply emulation
+faster debugging
+pattern detection
+Key Features
+Smart I2C reply system (not static replay)
+State-based LINK activation
+Interrupt timing emulation
+Real-time audio format conversion
+Modular design (STM32 + ESP32 roles separated)
+Challenges
+Sony requires behavior, not just signals
+Timing mismatches break pairing
+I2S format mismatch prevents audio
+PC10T transmitter is not fully compatible
+
+Results
+✅ Successful pairing (LINK HIGH)
+✅ Stable audio transmission
+✅ Custom audio injected into Sony system
+✅ Sony wireless audio decoded and played externally
+Future Work
+Full decoding of 0x41 DSP coefficients
+Smarter dynamic I2C emulation (no large arrays)
+Complete transmitter firmware replacement
+Reverse engineering Sony S-AIR protocol at RF level
+
+Next Project
+
+The next project will dive deeper into:
+
+Full breakdown of EZW-RT10A I2C registers
+DSP data structure inside 0x41
+Complete emulation of Sony DAV-HDX589W transmitter
+Building a fully independent S-AIR system
+Final Note
+
+This project proves that even closed proprietary systems can be:
+
+analyzed
+understood
+and recreated
+
+With enough persistence and the right tools.
+
+
+Disclaimer
+
+This project is provided for educational and research purposes only.
+
+All code and hardware designs in this repository are shared as-is, without any guarantees. By using this project, you agree that:
+
+You are using it at your own risk
+The author is not responsible for any damage to hardware, software, or data
+The author is not liable for any misuse or unintended behavior
+You are responsible for ensuring compliance with local laws and regulations
+
+This project involves:
+
+Reverse engineering proprietary systems
+Working with hardware signals (I2C, I2S, power lines)
+Modifying or interfacing with consumer electronics
+
+Improper use may result in:
+
+Device malfunction
+Permanent hardware damage
+Loss of functionality
+Responsibility Notice
+
+Use this code and information at your own responsibility.
+
+If you are unsure about any part of the implementation, it is strongly recommended to:
+
+Test on non-critical hardware
+Verify connections carefully
+Use proper power and grounding
+
+
+
+
+
+
