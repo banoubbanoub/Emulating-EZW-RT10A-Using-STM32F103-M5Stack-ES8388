@@ -16,6 +16,9 @@ static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void sony_emul_init(void);
 static void sony_emul_task(void);
+static void sony_emul_hard_restart(void);
+static void sony_watch_resn(void);
+static void build_reply(void);
 
 /* =========================================================
    USER PINS
@@ -60,6 +63,7 @@ static volatile uint8_t  seen_write16     = 0;
 static volatile uint8_t  seen_write10_85  = 0;
 static volatile uint8_t  seen_read74      = 0;
 static volatile uint32_t status_polls     = 0;
+static volatile uint16_t big50_count      = 0;
 
 /* =========================================================
    LINK / INT state
@@ -76,17 +80,20 @@ static uint32_t seq50 = 0;
 static uint32_t seq74 = 0;
 
 /* =========================================================
-   Timing
+   Timing / reset tracking
    ========================================================= */
 static uint32_t last_int_toggle_ms = 0;
 static uint32_t last_link_high_ms  = 0;
+
+static volatile uint8_t reset_pending = 0;
+static uint8_t last_resn = 1;
 
 /* =========================================================
    Helpers
    ========================================================= */
 static inline uint8_t resn_high(void)
 {
-    return (HAL_GPIO_ReadPin(PIN_RESN_PORT, PIN_RESN_PIN) == GPIO_PIN_SET);
+    return (HAL_GPIO_ReadPin(PIN_RESN_PORT, PIN_RESN_PIN) == GPIO_PIN_SET) ? 1u : 0u;
 }
 
 static inline void link_force_low(void)
@@ -120,23 +127,28 @@ static inline uint8_t *bank(void)
 
 static inline void reset_runtime_state(void)
 {
-    have_ptr         = 0;
-    write_active     = 0;
-    ptr              = 0;
-    reply_len        = 0;
+    cur_addr7         = 0;
+    have_ptr          = 0;
+    write_active      = 0;
+    ptr               = 0;
 
-    seq13            = 0;
-    seq41            = 0;
-    seq50            = 0;
-    seq74            = 0;
+    rx_byte           = 0;
+    reply_len         = 0;
 
-    seen_any_41      = 0;
-    seen_write46     = 0;
-    seen_bigblock50  = 0;
-    seen_write16     = 0;
-    seen_write10_85  = 0;
-    seen_read74      = 0;
-    status_polls     = 0;
+    seq13             = 0;
+    seq41             = 0;
+    seq50             = 0;
+    seq74             = 0;
+
+    seen_any_41       = 0;
+    seen_write46      = 0;
+    seen_bigblock50   = 0;
+    seen_write16      = 0;
+    seen_write10_85   = 0;
+    seen_read74       = 0;
+    status_polls      = 0;
+
+    big50_count       = 0;
 
     last_int_toggle_ms = HAL_GetTick();
     last_link_high_ms  = 0;
@@ -152,7 +164,7 @@ static inline uint8_t linked_ready(void)
    ========================================================= */
 
 /* ptr 0x13:
-   Use the real captured stream from sniff_replies.h
+   replay captured 2-byte stream
 */
 static void smart_reply_ptr13(void)
 {
@@ -164,8 +176,8 @@ static void smart_reply_ptr13(void)
 }
 
 /* ptr 0x41:
-   Use captured stream after link.
-   Before link keep stable 04 F0.
+   before link: stable 04 F0
+   after link: replay captured stream
 */
 static void smart_reply_ptr41(void)
 {
@@ -182,8 +194,8 @@ static void smart_reply_ptr41(void)
 }
 
 /* ptr 0x74:
-   Keep pre-link exactly 00 00.
-   After link mostly 03 00 with an occasional 02 00.
+   before link: 00 00
+   after link: mostly 03 00, occasional 02 00
 */
 static void smart_reply_ptr74(void)
 {
@@ -202,8 +214,8 @@ static void smart_reply_ptr74(void)
 }
 
 /* ptr 0x50:
-   Before link: return the first real frame instead of all-zero garbage.
-   After link: replay captured frames.
+   before link: first captured frame
+   after link: replay captured frames
 */
 static void smart_reply_ptr50(void)
 {
@@ -269,6 +281,40 @@ static void build_reply(void)
 }
 
 /* =========================================================
+   RESN watch / hard restart
+   ========================================================= */
+static void sony_watch_resn(void)
+{
+    uint8_t now_resn = resn_high();
+
+    if (now_resn != last_resn) {
+        last_resn = now_resn;
+        reset_pending = 1;
+    }
+}
+
+static void sony_emul_hard_restart(void)
+{
+    __disable_irq();
+
+    link_force_low();
+    int_force_high();
+    reset_runtime_state();
+
+    __enable_irq();
+
+    HAL_I2C_DeInit(&hi2c1);
+    MX_I2C1_Init();
+
+    __HAL_I2C_CLEAR_FLAG(&hi2c1, I2C_FLAG_BERR);
+    __HAL_I2C_CLEAR_FLAG(&hi2c1, I2C_FLAG_ARLO);
+    __HAL_I2C_CLEAR_FLAG(&hi2c1, I2C_FLAG_OVR);
+    __HAL_I2C_CLEAR_FLAG(&hi2c1, I2C_FLAG_AF);
+
+    HAL_I2C_EnableListen_IT(&hi2c1);
+}
+
+/* =========================================================
    HAL callbacks
    ========================================================= */
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c,
@@ -277,14 +323,16 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c,
 {
     (void)hi2c;
 
+    if (!resn_high()) {
+        write_active = 0;
+        have_ptr = 0;
+        HAL_I2C_EnableListen_IT(&hi2c1);
+        return;
+    }
+
     cur_addr7    = (uint8_t)(AddrMatchCode >> 1);
     have_ptr     = 0;
     write_active = 0;
-
-    if (!resn_high()) {
-        link_force_low();
-        int_force_high();
-    }
 
     if (TransferDirection == I2C_DIRECTION_TRANSMIT) {
         write_active = 1;
@@ -301,6 +349,7 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c)
     (void)hi2c;
 
     if (!write_active) return;
+    if (!resn_high())  return;
 
     if (!have_ptr) {
         ptr = rx_byte;
@@ -330,10 +379,14 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c)
             seen_write10_85 = 1;
         }
 
-        static uint16_t big50_count = 0;
         if (cur_addr7 == ADDR40) {
-            if (current_ptr == 0x50) big50_count = 1;
-            else if (current_ptr > 0x50 && big50_count != 0) big50_count++;
+            if (current_ptr == 0x50) {
+                big50_count = 1;
+            } else if (current_ptr > 0x50 && big50_count != 0) {
+                big50_count++;
+            } else {
+                big50_count = 0;
+            }
 
             if (big50_count >= 8) {
                 seen_bigblock50 = 1;
@@ -386,6 +439,9 @@ static void sony_emul_init(void)
     int_force_high();
     reset_runtime_state();
 
+    last_resn = resn_high();
+    reset_pending = 0;
+
     HAL_I2C_EnableListen_IT(&hi2c1);
 }
 
@@ -393,17 +449,21 @@ static void sony_emul_task(void)
 {
     uint32_t now = HAL_GetTick();
 
-    if (!resn_high()) {
-        link_force_low();
-        int_force_high();
-        reset_runtime_state();
+    sony_watch_resn();
+
+    if (reset_pending) {
+        reset_pending = 0;
+        sony_emul_hard_restart();
         return;
     }
 
-    /* New finding:
-       raise LINK once Sony is clearly in normal polling loop.
-       0x74 read is the strongest trigger.
-    */
+    if (!resn_high()) {
+        link_force_low();
+        int_force_high();
+        return;
+    }
+
+    /* raise LINK once Sony is clearly in normal polling loop */
     if (!linked_ready() &&
         seen_any_41 &&
         seen_read74 &&
@@ -418,9 +478,7 @@ static void sony_emul_task(void)
         return;
     }
 
-    /* Keep INT mostly high.
-       Short low pulse occasionally, not a constant square wave.
-    */
+    /* keep INT mostly high, short occasional low pulse */
     if (int_state_high) {
         if ((now - last_int_toggle_ms) >= 20u) {
             int_force_low();
@@ -516,9 +574,9 @@ static void MX_GPIO_Init(void)
     HAL_GPIO_WritePin(PIN_LINK_PORT, PIN_LINK_PIN, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(PIN_INT_PORT,  PIN_INT_PIN,  GPIO_PIN_SET);
 
-    /* RESN from Sony */
+       /* RESN from Sony */
     GPIO_InitStruct.Pin = PIN_RESN_PIN;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;//GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(PIN_RESN_PORT, &GPIO_InitStruct);
 
@@ -526,14 +584,14 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Pin = PIN_LINK_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;//GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(PIN_LINK_PORT, &GPIO_InitStruct);
 
     /* INT to Sony */
     GPIO_InitStruct.Pin = PIN_INT_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;//GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(PIN_INT_PORT, &GPIO_InitStruct);
 }
 
